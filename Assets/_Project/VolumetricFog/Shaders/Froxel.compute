@@ -345,7 +345,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 
     // calculate froxel color
     // ----------------------
-    half3 froxelColor = FogData.ambientColor * FogData.intensity;
+    float3 froxelColor = FogData.ambientColor * FogData.intensity;
     froxelColor += GetLightContribution(positionWS) * FogData.intensity;
     froxelColor += DirectionalLight(positionWS) * FogData.intensity;
     
@@ -355,7 +355,7 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     
     // write to the volume texture
     // ---------------------------
-    half4 output;
+    float4 output;
     output.rgb = froxelColor;
     output.a = extinction;
     _FroxelVolumeTexture[id] = output;

@@ -70,26 +70,17 @@ public class VolumetricFogRenderPass : ScriptableRenderPass
                 mFroxelShader.EnableKeyword(kSchlick);
                 mFroxelShader.DisableKeyword(kHenyeyGreenstein);
                 mFroxelShader.DisableKeyword(kCornetteShanks);
-                // mFroxelShader.DisableKeyword(kRayleigh);
                 break;
             case PhaseFunction.HenyeyGreenstein:
                 mFroxelShader.EnableKeyword(kHenyeyGreenstein);
                 mFroxelShader.DisableKeyword(kSchlick);
                 mFroxelShader.DisableKeyword(kCornetteShanks);
-                // mFroxelShader.DisableKeyword(kRayleigh);
                 break;
             case PhaseFunction.CornetteShanks:
                 mFroxelShader.EnableKeyword(kCornetteShanks);
                 mFroxelShader.DisableKeyword(kSchlick);
                 mFroxelShader.DisableKeyword(kHenyeyGreenstein);
-                // mFroxelShader.DisableKeyword(kRayleigh);
                 break;
-            // case PhaseFunction.Rayleigh:
-            //     mFroxelShader.EnableKeyword(kRayleigh);
-            //     mFroxelShader.DisableKeyword(kSchlick);
-            //     mFroxelShader.DisableKeyword(kHenyeyGreenstein);
-            //     mFroxelShader.DisableKeyword(kCornetteShanks);
-            //     break;
             default:
                 throw new ArgumentOutOfRangeException();
         }
@@ -104,7 +95,7 @@ public class VolumetricFogRenderPass : ScriptableRenderPass
     {
         // setup RTHandles
         // ---------------
-        mSource = mDestination = renderingData.cameraData.renderer.cameraColorTargetHandle;
+        mSource = renderingData.cameraData.renderer.cameraColorTargetHandle;
         var descriptor = renderingData.cameraData.cameraTargetDescriptor;
         descriptor.depthBufferBits = 0;
         RenderingUtils.ReAllocateIfNeeded(ref mCompositeTexture, descriptor, FilterMode.Bilinear, TextureWrapMode.Clamp, name:kCompositeTextureName);
@@ -181,7 +172,7 @@ public class VolumetricFogRenderPass : ScriptableRenderPass
                 cmd.SetGlobalFloat(_CameraFarOverMaxFar, renderingData.cameraData.camera.farClipPlane / mFarClip);
                 cmd.SetGlobalFloat(_NearOverFarClip, mVolumetricFogVolume.m_NearClip.value / mFarClip);
                 Blitter.BlitCameraTexture(cmd, mSource, mCompositeTexture, mCompositeMaterial, 0);
-                Blitter.BlitCameraTexture(cmd, mCompositeTexture, mDestination);
+                Blitter.BlitCameraTexture(cmd, mCompositeTexture, mSource);
             }
         }
         context.ExecuteCommandBuffer(cmd);
@@ -200,7 +191,6 @@ public class VolumetricFogRenderPass : ScriptableRenderPass
         mVolumetricFogDataBuffer?.Release();
 
         mSource?.Release();
-        mDestination?.Release();
         mCompositeTexture?.Release();
     }
     
@@ -328,8 +318,6 @@ public class VolumetricFogRenderPass : ScriptableRenderPass
     {
         return SystemInfo.IsFormatSupported(GraphicsFormat.R16G16B16A16_SFloat, FormatUsage.Render) ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.DefaultHDR;
     }
-     
-    #region Fields
     
     private const string kSchlick = "_SCHLICK";
     private const string kHenyeyGreenstein = "_HENYEY_GREENSTEIN";
@@ -358,8 +346,8 @@ public class VolumetricFogRenderPass : ScriptableRenderPass
     // render textures
     // ---------------
     private readonly RTHandle mScatterTexture;
-    private          RTHandle      mCompositeTexture;
-    private          RTHandle      mSource, mDestination;
+    private          RTHandle mCompositeTexture;
+    private          RTHandle mSource;
     private RTHandle mFroxelTexture;
     
     // shader properties and related variables
@@ -437,8 +425,6 @@ public class VolumetricFogRenderPass : ScriptableRenderPass
     private LightData[] mLightDataArray;
     private int mTotalFogLightCount;
     private HashSet<VolumetricFogLight> mFogLights;
-
-    #endregion
 }
 
 

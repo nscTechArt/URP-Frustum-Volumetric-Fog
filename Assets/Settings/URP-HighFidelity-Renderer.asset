@@ -74,7 +74,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5f4721eacad1d0d4ca18bb06841f7d59, type: 3}
   m_Name: AreaLightRenderFeature
   m_EditorClassIdentifier: 
-  m_Active: 1
+  m_Active: 0
   m_Settings:
     m_RenderPassEvent: 600
     m_AreaLightPassShader: {fileID: 4800000, guid: d1d7b4bd26190744186ad6ee3d7c0e08,
