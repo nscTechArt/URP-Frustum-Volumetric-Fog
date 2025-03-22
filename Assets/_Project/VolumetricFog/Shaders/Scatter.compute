@@ -1,0 +1,74 @@
+#pragma kernel CSMain
+#define VOLUME_DEPTH 128.0
+
+float _VolumetricFogNearClip;
+float _VolumetricFogFarClip;
+float _NearOverFarClip;
+#define Near _VolumetricFogNearClip
+#define Far _VolumetricFogFarClip
+
+Texture3D _FroxelVolumeTexture;
+RWTexture3D<float4> _ScatterVolumeTexture;
+
+float SliceThickness(float z)
+{
+    float ratio = z / 128.0;
+    float ratioNext = (z + 1) / 128.0;
+
+    float nearOverFar = Near / Far;
+    float zScale = nearOverFar + ratio * (1 - nearOverFar);
+    float zScaleNext = nearOverFar + ratioNext * (1 - nearOverFar);
+    
+    return zScaleNext - zScale;
+}
+
+float4 ScatterStep(float4 accum, float4 slice, float sliceThickness)
+{
+    // compute current slice's transmittance
+    // -------------------------------------
+    float sliceDensity = max(slice.a, 0.000001);
+    float sliceTransmittance = exp(- sliceThickness * sliceDensity);
+    
+    // http://www.frostbite.com/2015/08/physically-based-unified-volumetric-rendering-in-frostbite/
+    float3 sliceLightIntegral = slice.rgb * (1.0 - sliceTransmittance);
+
+    accum.rgb += sliceLightIntegral * accum.a;
+    accum.a *= sliceTransmittance;
+	
+    return float4(accum.rgb, accum.a);
+}
+
+float BeerLambert(float extinction, float distance)
+{
+    return exp(-extinction * distance);
+}
+
+float4 ScatterStep(float3 totalScattering, float totalTransmittance, float3 sliceLighting, float sliceExtinction)
+{
+    float distance = 1 / VOLUME_DEPTH;
+    float transmittance = BeerLambert(sliceExtinction, distance);
+    float lightingAttenuation = 1 - transmittance;
+
+    float3 inScattering = sliceLighting * lightingAttenuation;
+
+    totalScattering += inScattering * totalTransmittance;
+    totalTransmittance *= transmittance;
+    
+    return float4(totalScattering, totalTransmittance);
+}
+
+[numthreads(32, 2, 1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float4 result = float4(0, 0, 0, 1);
+    
+    for (uint sliceIndex = 0; sliceIndex < VOLUME_DEPTH; sliceIndex++)
+    {
+        uint3 uvw = uint3(id.xy, sliceIndex);
+        float4 slice = _FroxelVolumeTexture[uvw];
+        
+        result = ScatterStep(result.rgb, result.a, slice.rgb, slice.a);
+
+        _ScatterVolumeTexture[uvw] = result;
+    }
+}

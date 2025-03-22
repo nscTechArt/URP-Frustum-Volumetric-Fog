@@ -1,0 +1,375 @@
+#pragma kernel CSMain 
+#pragma multi_compile _SCHLICK _HENYEY_GREENSTEIN _CORNETTE_SHANKS
+
+#define _MAIN_LIGHT_SHADOWS
+#define _MAIN_LIGHT_SHADOWS_CASCADE
+#define _SHADOWS_SOFT
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+
+RWTexture3D<float4> _FroxelVolumeTexture;
+
+struct VolumetricFogData
+{
+    float density;
+    float intensity;
+    float anisotropy;
+
+    float constantFog;
+    float heightFog;
+    float heightFogExponent;
+    float heightFogOffset;
+
+    float noiseAmount;
+    float noiseScale;
+
+    float3 ambientColor;
+
+    float4 wind;
+
+    float4 cameraTopLeftCorner;
+    float4 cameraXExtent;
+    float4 cameraYExtent;
+
+    float4x4 historyViewProj;
+};
+struct FogLightData
+{
+    float3 pos;
+    float  range;
+    float3 color;
+    float  invAngleRange;
+    float3 direction;
+    float  outerCosScaled;
+    int    lightType;
+    float3 padding;
+    float4x4 projection;
+};
+
+StructuredBuffer<VolumetricFogData> _VolumetricFogData;
+#define FogData _VolumetricFogData[0]
+
+int _FogLightCount;
+StructuredBuffer<FogLightData> _FogLightData;
+
+float _VolumetricFogNearClip;
+float _VolumetricFogFarClip;
+float _NearOverFarClip;
+#define Near _VolumetricFogNearClip
+#define Far _VolumetricFogFarClip
+
+float LightAttenuation(float distance)
+{
+    return 1.0 / (1.0 + 25.0 * distance);
+}
+
+float AttenuationToZero(float distNorm)
+{
+    float att = LightAttenuation(distNorm);
+    
+    float oneDistNorm = 1.0 - distNorm;
+    att *= lerp(1.0, oneDistNorm * 2.78, step(0.64, distNorm));
+
+    att *= step(0.0, oneDistNorm);
+
+    return att;
+}
+
+float Schlick(float cosTheta)
+{
+    float k = FogData.anisotropy;
+    float num = 1 - k * k;
+    float denom = 1 - k * cosTheta;
+    return num / (denom * denom);
+}
+
+float HenyeyGreenstein(float cosTheta)
+{
+    float g = FogData.anisotropy;
+    float gSquared = g * g;
+    float denom = 1 + gSquared - 2.0 * g * cosTheta;
+    denom = denom * denom * denom;
+    denom = sqrt(max(0, denom));
+    return (1 - gSquared) / denom;
+}
+
+float CornetteShanks(float cosTheta)
+{
+    float g = FogData.anisotropy;
+    float g2 = g * g;
+    float cos2 = cosTheta * cosTheta;
+    
+    float term1 = 3 * (1 - g2) / (2 * (2 + g2));
+    float term2 = (1 + cos2) / pow(1 + g2 - 2 * g * cosTheta, 1.5);
+
+    return term1 * term2;
+}
+
+// float Rayleigh(float cosTheta)
+// {
+//     return (3.0 / (16 * PI) ) * (1 + cosTheta * cosTheta);
+// }
+
+float LightPhase(float cosTheta)
+{
+    #ifdef _SCHLICK
+        return Schlick(cosTheta);
+    #elif defined (_HENYEY_GREENSTEIN)
+        return HenyeyGreenstein(cosTheta);
+    #elif defined (_CORNETTE_SHANKS)
+        return CornetteShanks(cosTheta);
+    // #else
+    //     return Rayleight(cosTheta);
+    #endif
+}
+
+float3 DirectionalLight(float3 positionWS)
+{
+    float4 shadowCoord = TransformWorldToShadowCoord(positionWS);
+    Light mainLight = GetMainLight(shadowCoord);
+    float3 lightColor = mainLight.color * mainLight.shadowAttenuation;
+    float3 lightDir = mainLight.direction;
+    
+    float3 viewDir = normalize(positionWS - _WorldSpaceCameraPos);
+    float cosTheta = dot(-lightDir, viewDir);
+    float phase = LightPhase(cosTheta);
+    
+    return lightColor * phase;
+}
+
+float3 GetLightContribution(float3 pos)
+{
+    float3 color = 0;
+
+    for (int i = 0; i < _FogLightCount; i++)
+    {
+        if (_FogLightData[i].lightType == 1)
+        {
+            // calculate attenuation
+            // ---------------------
+            float3 posToLightPos = _FogLightData[i].pos - pos;
+            // light's range has been processed in C#,
+            // check VolumetricFogRenderPass.cs for details
+            float distance = dot(posToLightPos, posToLightPos) * _FogLightData[i].range;
+            float attenuation = LightAttenuation(distance);
+
+            // for now visibility is not an option of point light
+            // --------------------------------------------------
+            float visibility = 1;
+
+            // calculate phase
+            // ---------------
+            float3 viewDir = normalize(pos - _WorldSpaceCameraPos);
+            float cosTheta = dot(viewDir, normalize(posToLightPos));
+            float phase = LightPhase(cosTheta);
+
+            color += _FogLightData[i].color * attenuation * visibility * phase;
+        }
+        else if (_FogLightData[i].lightType == 2)
+        {
+            float3 posToLightPos = _FogLightData[i].pos - pos;
+            float3 normalizedPosToLightPos = normalize(posToLightPos);
+            float distanceNormalized = dot(posToLightPos, posToLightPos) * _FogLightData[i].range;
+            float spotLightAtt = saturate(dot(normalizedPosToLightPos, -_FogLightData[i].direction) * _FogLightData[i].invAngleRange + _FogLightData[i].outerCosScaled);
+            spotLightAtt *= spotLightAtt;
+            float distanceSquared = max(dot(normalizedPosToLightPos, normalizedPosToLightPos), 0.01);
+            spotLightAtt /= distanceSquared;
+            float att = LightAttenuation(distanceNormalized) * spotLightAtt;
+            float3 cameraToPos = normalize(pos - _WorldSpaceCameraPos);
+            float cosTheta = dot(cameraToPos, normalizedPosToLightPos);
+            att *= LightPhase(cosTheta);
+
+            color += _FogLightData[i].color * att;
+        }
+        else if (_FogLightData[i].lightType == 3)
+        {
+            float4 pClip = mul(_FogLightData[i].projection, float4(pos, 1));
+            float3 p = float3(pClip.x / pClip.w, pClip.y / pClip.w, pClip.z);
+            float z = p.z * 0.5 + 0.5;
+
+            float att = saturate(AttenuationToZero(z * z));
+            float corner = 0.4;
+            float outset = 0.8;
+            float smooth = 0.7;
+
+            float d = length(max(abs(p.xy) - 1 + corner * outset, 0.0)) - corner;
+            att *= saturate(1 - smoothstep(-smooth, 0, d));
+            att *= smoothstep(-0.01, 0.01, z);
+        
+            float3 cameraToPos = normalize(pos - _WorldSpaceCameraPos);
+            float3 lightPos = _FogLightData[i].pos;
+            float3 posToLight = lightPos.xyz - pos;
+            float cosTheta = dot(cameraToPos, normalize(posToLight));
+            att *= LightPhase(cosTheta);
+
+            color += _FogLightData[i].color * att;
+        }
+    }
+
+    return color;
+}
+
+float HashNoise( float n ) { return frac(sin(n)*753.5453123); }
+
+float PerlinNoise(float3 x)
+{
+    float3 p = floor(x);
+    float3 f = frac(x);
+    f = f*f*(3.0-2.0*f);
+	
+    float n = p.x + p.y*157.0 + 113.0*p.z;
+    return lerp(lerp(lerp( HashNoise(n+  0.0), HashNoise(n+  1.0),f.x),
+                   lerp( HashNoise(n+157.0), HashNoise(n+158.0),f.x),f.y),
+               lerp(lerp( HashNoise(n+113.0), HashNoise(n+114.0),f.x),
+                   lerp( HashNoise(n+270.0), HashNoise(n+271.0),f.x),f.y),f.z);
+}
+
+float DirectionalNoise(float3 pos)
+{
+    float3 direction = FogData.wind.xyz;
+    float speed = FogData.wind.w;
+    
+    float3 noiseScroll = direction * fmod(_Time.y, 5000.0) * speed;
+    
+    float3 q = pos - noiseScroll;
+    q *= FogData.noiseScale;
+
+    float f = 0.5 * PerlinNoise(q);
+    // scroll the next octave in the opposite direction to get some morphing instead of just scrolling
+    q += noiseScroll * FogData.noiseScale;
+    q = q * 2.01;
+    f += 0.25 * PerlinNoise(q);
+
+    f += -0.3;
+    f *= 8;
+
+    f = max(f, 0.0);
+    return lerp(1.0, f, FogData.noiseAmount);
+}
+
+float Extinction(float3 pos)
+{
+    // generate noise
+    // --------------
+    float noise = DirectionalNoise(pos) * FogData.density;
+    
+    // constant fog
+    // ------------
+    float constantFog = FogData.constantFog;
+
+    // height fog
+    // ----------
+    float height = -pos.y + FogData.heightFogOffset;
+    float heightFog = max(exp(FogData.heightFogExponent * height) * FogData.heightFog, 0.0);
+
+    // apply noise and global density multiplier
+    // -----------------------------------------
+    constantFog *= noise;
+    heightFog *= noise;
+    
+    return max(0.0, constantFog + heightFog);
+}
+
+float Hash13(float3 p)
+{
+    p = frac(p * 0.1031);
+    p += dot(p, p.zyx + 31.32);
+    return frac((p.x + p.y) * p.z);
+}
+
+float3 ReconstructWorldSpacePosition(uint3 id)
+{
+    float2 uv = float2(float(id.x + 0.5) / 160, float(id.y + 0.5) / 90);
+    uv.y = 1.0 - uv.y;
+
+    // generate jitter value
+    // ---------------------
+    // float jitter = Hash13(float3(uv, _Time.y * id.z)) - 0.5;
+    float jitter =  0;
+
+    // for more accurate depth, we are using non-linear depth distribution
+    // -------------------------------------------------------------------
+    float ratio = float(id.z + jitter) / 128.0;
+    float nearOverFar = Near / Far;
+    float zScale = nearOverFar + ratio * (1 - nearOverFar);
+    
+    float3 positionVS = FogData.cameraTopLeftCorner.xyz +
+                        FogData.cameraXExtent.xyz * uv.x +
+                        FogData.cameraYExtent.xyz * uv.y;
+    positionVS *= zScale;
+
+    return _WorldSpaceCameraPos + positionVS;
+}
+
+float3 ReconstructHistoryUV(uint3 id)
+{
+    // first calculate positionWS without jitter
+    // -----------------------------------------
+    float2 uv = float2(float(id.x + 0.5) / 160, float(id.y + 0.5) / 90);
+    // uv.y = 1.0 - uv.y;
+    
+    float ratio = float(id.z) / 128.0;
+    float nearOverFar = Near / Far;
+    float zScale = nearOverFar + ratio * (1 - nearOverFar);
+    
+    float3 positionVS = FogData.cameraTopLeftCorner.xyz +
+                        FogData.cameraXExtent.xyz * uv.x +
+                        FogData.cameraYExtent.xyz * uv.y;
+    positionVS *= zScale;
+    float3 positionWS = _WorldSpaceCameraPos + positionVS;
+
+    // transform to clip space with last frame's view projection matrix
+    // ----------------------------------------------------------------
+    float4 positionCS = mul(FogData.historyViewProj, float4(positionWS, 1));
+    
+    // transform to NDC
+    // ----------------
+    float3 positionNDC = positionCS.xyz / positionCS.w;
+    positionNDC.y = -positionNDC.y;
+
+    float linearDepth = positionNDC.z;
+    float uvZ = (log2(linearDepth * 128.0 + 1.0) + 1.0) / 128.0;
+    
+    float3 historyUV = float3(positionNDC.xy * 0.5 + 0.5, uvZ);
+
+    return historyUV;
+}
+
+[numthreads(16, 2, 16)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // reconstruct voxels' world space position from froxel id
+    // -------------------------------------------------------
+    float3 positionWS = ReconstructWorldSpacePosition(id);
+
+    // calculate froxel color
+    // ----------------------
+    half3 froxelColor = FogData.ambientColor * FogData.intensity;
+    froxelColor += GetLightContribution(positionWS) * FogData.intensity;
+    froxelColor += DirectionalLight(positionWS) * FogData.intensity;
+    
+    // estimate participating media extinction coefficient
+    // ---------------------------------------------------
+    float extinction = Extinction(positionWS);
+    
+    // write to the volume texture
+    // ---------------------------
+    half4 output;
+    output.rgb = froxelColor;
+    output.a = extinction;
+    _FroxelVolumeTexture[id] = output;
+}
+
+// temporal filter
+// ---------------
+// float3 historyUV = ReconstructHistoryUV(id);
+// half4 lastFroxel = _FroxelTextureRead.SampleLevel(sampler_LinearClamp, historyUV, 0);
+// output = lerp(lastFroxel, output, 0.9);
+
+// output.rgb = float3(id.x / 160.0, id.y / 90.0, id.z / 128.0);
+// output.rgb = historyUV;
+// output.a = 1;
+    
+// write to the volume texture
+// ---------------------------
